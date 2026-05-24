@@ -1,40 +1,208 @@
-package main
+package handler
 
 import (
-	"context"
-	"errors"
-	"fmt"
+	"encoding/json"
+	"io"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
-
-	"github.com/joho/godotenv"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-
-	log "github.com/sirupsen/logrus"
 )
 
-var (
-	Version   = "dev"
-	Commit    = "none"
-	BuildDate = "unknown"
-)
-
-func init() {
-	logging.SetupBaseLogger()
-
-	buildinfo.Version = Version
-	buildinfo.Commit = Commit
-	buildinfo.BuildDate = BuildDate
+type OpenAIRequest struct {
+	Model    string `json:"model"`
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
 }
 
-func main() {
+type OpenAIResponse struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Index int `json:"index"`
+		Message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+func Handler(w http.ResponseWriter, r *http.Request) {
+
+	enableCORS(&w)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	path := r.URL.Path
+
+	switch {
+
+	case path == "/":
+		rootHandler(w, r)
+
+	case strings.HasPrefix(path, "/v1/chat/completions"):
+		openAIHandler(w, r)
+
+	case strings.HasPrefix(path, "/v1/messages"):
+		claudeHandler(w, r)
+
+	case strings.HasPrefix(path, "/v1beta/models"):
+		geminiHandler(w, r)
+
+	default:
+		notFound(w)
+	}
+}
+
+func rootHandler(w http.ResponseWriter, r *http.Request) {
+
+	resp := map[string]any{
+		"status":  "ok",
+		"service": "CLIProxyAPI",
+		"runtime": "vercel",
+		"time":    time.Now().Unix(),
+		"port":    os.Getenv("PORT"),
+	}
+
+	writeJSON(w, 200, resp)
+}
+
+func openAIHandler(w http.ResponseWriter, r *http.Request) {
+
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{
+			"error": "method not allowed",
+		})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+
+	if err != nil {
+		writeJSON(w, 400, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	var req OpenAIRequest
+
+	_ = json.Unmarshal(body, &req)
+
+	userContent := "Hello from CLIProxyAPI"
+
+	if len(req.Messages) > 0 {
+		userContent = req.Messages[len(req.Messages)-1].Content
+	}
+
+	var resp OpenAIResponse
+
+	resp.ID = "chatcmpl-vercel"
+	resp.Object = "chat.completion"
+	resp.Created = time.Now().Unix()
+	resp.Model = req.Model
+
+	choice := struct {
+		Index int `json:"index"`
+		Message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	}{
+		Index: 0,
+		FinishReason: "stop",
+	}
+
+	choice.Message.Role = "assistant"
+	choice.Message.Content = "Echo: " + userContent
+
+	resp.Choices = append(resp.Choices, choice)
+
+	writeJSON(w, 200, resp)
+}
+
+func claudeHandler(w http.ResponseWriter, r *http.Request) {
+
+	writeJSON(w, 200, map[string]any{
+		"id":   "msg_vercel",
+		"type": "message",
+		"role": "assistant",
+		"content": []map[string]any{
+			{
+				"type": "text",
+				"text": "Hello Claude API",
+			},
+		},
+	})
+}
+
+func geminiHandler(w http.ResponseWriter, r *http.Request) {
+
+	writeJSON(w, 200, map[string]any{
+		"models": []map[string]any{
+			{
+				"name": "gemini-2.5-pro",
+			},
+			{
+				"name": "gemini-2.5-flash",
+			},
+		},
+	})
+}
+
+func notFound(w http.ResponseWriter) {
+
+	writeJSON(w, 404, map[string]any{
+		"error": "not found",
+	})
+}
+
+func enableCORS(w *http.ResponseWriter) {
+
+	(*w).Header().Set(
+		"Access-Control-Allow-Origin",
+		"*",
+	)
+
+	(*w).Header().Set(
+		"Access-Control-Allow-Headers",
+		"*",
+	)
+
+	(*w).Header().Set(
+		"Access-Control-Allow-Methods",
+		"GET,POST,PUT,DELETE,OPTIONS",
+	)
+
+	(*w).Header().Set(
+		"Content-Type",
+		"application/json",
+	)
+}
+
+func writeJSON(
+	w http.ResponseWriter,
+	status int,
+	data any,
+) {
+
+	w.WriteHeader(status)
+
+	encoder := json.NewEncoder(w)
+
+	encoder.SetIndent("", "  ")
+
+	_ = encoder.Encode(data)
+}func main() {
 	fmt.Printf(
 		"CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n",
 		buildinfo.Version,
